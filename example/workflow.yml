@@ -1,0 +1,46 @@
+name: Update Feature and Milestone Dates
+
+on:
+  issues:
+    types: [opened, edited, labeled, unlabeled, closed, reopened]
+  project_card:
+    types: [created, edited, moved]
+  milestone:
+    types: [created, edited, opened, closed, deleted]
+  workflow_dispatch:
+    inputs:
+      feature_issue_number:
+        description: 'Feature issue number to update (leave empty to update all features)'
+        required: false
+      milestone_number:
+        description: 'Milestone number to update (leave empty to update relevant milestones)'
+        required: false
+
+jobs:
+  update-dates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.19'
+
+      - name: Build date manager
+        run: go build -o date-manager .
+
+      - name: Run date manager
+        run: ./date-manager
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
+          ISSUE_LABELS: ${{ toJSON(github.event.issue.labels || '[]') }}
+          ISSUE_BODY: ${{ github.event.issue.body || '' }}
+          PROJECT_CARD_URL: ${{ github.event.project_card.content_url || '' }}
+          FEATURE_ISSUE_NUMBER: ${{ github.event.inputs.feature_issue_number || '' }}
+          MILESTONE_NUMBER: ${{ github.event.inputs.milestone_number || '' }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}

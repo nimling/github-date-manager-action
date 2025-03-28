@@ -1,0 +1,82 @@
+name: Build and Publish Action
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.24'
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Build
+        run: go build -v -o date-manager .
+
+      - name: Run tests
+        run: go test -v ./...
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: false
+          tags: github-date-manager:latest
+          load: true
+
+      - name: Test Docker image
+        run: |
+          docker run --rm github-date-manager:latest --version || true
+
+      - name: Tag Docker image for release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "Tagging release $VERSION"
+          # Extract major version for the v1, v2, etc. tags
+          MAJOR_VERSION=$(echo $VERSION | cut -d. -f1)
+          docker tag github-date-manager:latest github-date-manager:$VERSION
+          docker tag github-date-manager:latest github-date-manager:$MAJOR_VERSION
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push Docker image
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/github-date-manager:latest
+            ghcr.io/${{ github.repository_owner }}/github-date-manager:${{ github.ref_name }}
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            date-manager
+            LICENSE
+            README.md

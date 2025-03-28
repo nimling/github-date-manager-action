@@ -1,0 +1,33 @@
+name: 'GitHub Project Date Manager'
+description: 'Automatically manages dates for GitHub Projects and Milestones'
+author: 'nimling'
+inputs:
+  github-token:
+    description: 'GitHub token to use for API calls'
+    required: true
+    default: ${{ github.token }}
+  owner:
+    description: 'Repository owner (default: current repository owner)'
+    required: false
+    default: ${{ github.repository_owner }}
+  repo:
+    description: 'Repository name (default: current repository name)'
+    required: false
+  feature-issue-number:
+    description: 'Feature issue number to update'
+    required: false
+  milestone-number:
+    description: 'Milestone number to update'
+    required: false
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    GITHUB_TOKEN: ${{ inputs.github-token }}
+    OWNER: ${{ inputs.owner }}
+    REPO: ${{ inputs.repo || github.event.repository.name }}
+    FEATURE_ISSUE_NUMBER: ${{ inputs.feature-issue-number }}
+    MILESTONE_NUMBER: ${{ inputs.milestone-number }}
+branding:
+  icon: 'calendar'
+  color: '#292c33'
