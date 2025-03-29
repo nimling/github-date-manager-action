@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Update Project Dates
-        uses: nimling/github-date-manager-action@v1
+        uses: nimling/github-date-manager-action@v1.0.0
         with:
           # Optional parameters (defaults should work for most cases)
           github-token: ${{ secrets.GITHUB_TOKEN }}

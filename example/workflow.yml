@@ -17,30 +17,27 @@ on:
         required: false
 
 jobs:
-  update-dates:
+  manage-dates:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Set up Go
-        uses: actions/setup-go@v4
+      - name: Run Date Manager
+        uses: nimling/github-date-manager-action@v0.1.4
         with:
-          go-version: '1.19'
-
-      - name: Build date manager
-        run: go build -o date-manager .
-
-      - name: Run date manager
-        run: ./date-manager
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OWNER: ${{ github.repository_owner }}
-          REPO: ${{ github.event.repository.name }}
-          ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
-          ISSUE_LABELS: ${{ toJSON(github.event.issue.labels || '[]') }}
-          ISSUE_BODY: ${{ github.event.issue.body || '' }}
-          PROJECT_CARD_URL: ${{ github.event.project_card.content_url || '' }}
-          FEATURE_ISSUE_NUMBER: ${{ github.event.inputs.feature_issue_number || '' }}
-          MILESTONE_NUMBER: ${{ github.event.inputs.milestone_number || '' }}
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # All other variables are automatically picked up from the event context
+        # Alternatively, if you want to specify all environment variables explicitly:
+        # env:
+        #   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        #   OWNER: ${{ github.repository_owner }}
+        #   REPO: ${{ github.event.repository.name }}
+        #   ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
+        #   ISSUE_LABELS: ${{ toJSON(github.event.issue.labels || '[]') }}
+        #   ISSUE_BODY: ${{ github.event.issue.body || '' }}
+        #   PROJECT_CARD_URL: ${{ github.event.project_card.content_url || '' }}
+        #   FEATURE_ISSUE_NUMBER: ${{ github.event.inputs.feature_issue_number || '' }}
+        #   MILESTONE_NUMBER: ${{ github.event.inputs.milestone_number || '' }}
+        #   GITHUB_EVENT_NAME: ${{ github.event_name }}
