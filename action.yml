@@ -36,6 +36,7 @@ inputs:
 runs:
   using: 'docker'
   image: 'docker://ghcr.io/nimling/github-date-manager-action:v1.0.0'
+  entrypoint: '/app/date-manager'
   env:
     GITHUB_TOKEN: ${{ inputs.github_token }}
     OWNER: ${{ inputs.owner }}
