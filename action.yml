@@ -1,33 +1,53 @@
-name: 'GitHub Project Date Manager'
-description: 'Automatically manages dates for GitHub Projects and Milestones'
+name: 'GitHub Date Manager'
+description: 'Manages dates in GitHub issues based on labels and other triggers'
 author: 'nimling'
 inputs:
-  github-token:
-    description: 'GitHub token to use for API calls'
+  github_token:
+    description: 'GitHub token for API access'
     required: true
-    default: ${{ github.token }}
   owner:
-    description: 'Repository owner (default: current repository owner)'
+    description: 'Repository owner'
     required: false
-    default: ${{ github.repository_owner }}
   repo:
-    description: 'Repository name (default: current repository name)'
+    description: 'Repository name'
     required: false
-  feature-issue-number:
-    description: 'Feature issue number to update'
+  issue_number:
+    description: 'Issue number to process'
     required: false
-  milestone-number:
-    description: 'Milestone number to update'
+  issue_labels:
+    description: 'JSON string of issue labels'
     required: false
+  issue_body:
+    description: 'Issue body text'
+    required: false
+  project_card_url:
+    description: 'URL of the project card'
+    required: false
+  feature_issue_number:
+    description: 'Feature issue number for manual processing'
+    required: false
+  milestone_number:
+    description: 'Milestone number for manual processing'
+    required: false
+  github_event_name:
+    description: 'GitHub event name'
+    required: false
+
 runs:
   using: 'docker'
-  image: 'Dockerfile'
+  image: 'docker://ghcr.io/nimling/github-date-manager-action:v1.0.0'
   env:
-    GITHUB_TOKEN: ${{ inputs.github-token }}
+    GITHUB_TOKEN: ${{ inputs.github_token }}
     OWNER: ${{ inputs.owner }}
-    REPO: ${{ inputs.repo || github.event.repository.name }}
-    FEATURE_ISSUE_NUMBER: ${{ inputs.feature-issue-number }}
-    MILESTONE_NUMBER: ${{ inputs.milestone-number }}
+    REPO: ${{ inputs.repo }}
+    ISSUE_NUMBER: ${{ inputs.issue_number }}
+    ISSUE_LABELS: ${{ inputs.issue_labels }}
+    ISSUE_BODY: ${{ inputs.issue_body }}
+    PROJECT_CARD_URL: ${{ inputs.project_card_url }}
+    FEATURE_ISSUE_NUMBER: ${{ inputs.feature_issue_number }}
+    MILESTONE_NUMBER: ${{ inputs.milestone_number }}
+    GITHUB_EVENT_NAME: ${{ inputs.github_event_name }}
+
 branding:
   icon: 'calendar'
-  color: '#292c33'
+  color: 'blue'
