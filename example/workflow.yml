@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Run Date Manager
-        uses: nimling/github-date-manager-action@v0.1.4
+        uses: nimling/github-date-manager-action@latest
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           # All other variables are automatically picked up from the event context
