@@ -21,8 +21,11 @@ type ProjectV2ItemFieldValue struct {
 		ID   string
 		Name string
 	} `graphql:"field"`
-	DateValue   *string  `graphql:"... on ProjectV2ItemFieldDateValue"`
-	NumberValue *float64 `graphql:"... on ProjectV2ItemFieldNumberValue"`
+	// Type information
+	TypeName string `graphql:"__typename"`
+	// These are for the different field types
+	DateValue   *githubv4.Date `graphql:"... on ProjectV2ItemFieldDateValue"`
+	NumberValue *float64       `graphql:"... on ProjectV2ItemFieldNumberValue"`
 }
 
 type ProjectV2Item struct {
@@ -42,7 +45,7 @@ type ProjectV2Field struct {
 	Name string
 }
 
-// App configuration
+// Config App configuration
 type Config struct {
 	Owner              string
 	Repo               string
@@ -56,20 +59,75 @@ type Config struct {
 	EventName          string
 }
 
-// Field IDs for a project
+// FieldIDs Field IDs for a project
 type FieldIDs struct {
 	StartDateFieldID  string
 	TargetDateFieldID string
 	DurationFieldID   string
 }
 
-// Task with missing dates
+// TaskWithMissingDates Task with missing dates
 type TaskWithMissingDates struct {
 	TaskNumber   int
 	ProjectItems []ProjectV2Item
 }
 
-// Load environment variables from .env file
+type FeatureIssue struct {
+	Number      int
+	Title       string
+	Body        string
+	Labels      []string
+	Milestone   int
+	TaskIDs     []int
+	ProjectData []ProjectV2Item
+	StartDate   *time.Time
+	TargetDate  *time.Time
+	Duration    *float64
+}
+
+// TaskIssue represents a task issue with all its data
+type TaskIssue struct {
+	Number      int
+	Title       string
+	Body        string
+	FeatureID   int
+	ProjectData []ProjectV2Item
+	StartDate   *time.Time
+	TargetDate  *time.Time
+	Duration    *float64
+}
+
+// PlannedUpdate represents a planned update that will be executed in bulk
+type PlannedUpdate struct {
+	Type       string // "feature", "task", "milestone"
+	ItemNumber int
+	ProjectID  string
+	ItemID     string
+	FieldID    string
+	FieldName  string
+	OldValue   interface{}
+	NewValue   interface{}
+	HasChanged bool
+}
+
+// DateManagerService - modify to include caches
+type DateManagerService struct {
+	ctx           context.Context
+	config        *Config
+	restClient    *github.Client
+	graphqlClient *githubv4.Client
+
+	// Caches
+	featureCache      map[int]*FeatureIssue
+	taskCache         map[int]*TaskIssue
+	milestoneCache    map[int]*github.Milestone
+	projectFieldCache map[string]FieldIDs
+
+	// Track changes to apply in bulk
+	plannedUpdates []PlannedUpdate
+}
+
+// loadConfig Load environment variables from .env file
 func loadConfig() (*Config, error) {
 	err := godotenv.Load()
 	if err != nil {
@@ -85,7 +143,6 @@ func loadConfig() (*Config, error) {
 		EventName:      os.Getenv("GITHUB_EVENT_NAME"),
 	}
 
-	// Parse integer values
 	if issueNum := os.Getenv("ISSUE_NUMBER"); issueNum != "" {
 		config.IssueNumber, _ = strconv.Atoi(issueNum)
 	}
@@ -98,10 +155,7 @@ func loadConfig() (*Config, error) {
 		config.MilestoneNumber, _ = strconv.Atoi(milestoneNum)
 	}
 
-	// Parse JSON labels
 	if labelJSON := os.Getenv("ISSUE_LABELS"); labelJSON != "" {
-		// For simplicity, we'll just extract the name values with regex
-		// In a production app, use proper JSON parsing
 		re := regexp.MustCompile(`"name":"([^"]+)"`)
 		matches := re.FindAllStringSubmatch(labelJSON, -1)
 		for _, match := range matches {
@@ -115,26 +169,20 @@ func loadConfig() (*Config, error) {
 }
 
 func main() {
-	// Load configuration
 	config, err := loadConfig()
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	// Create GitHub clients
 	ctx := context.Background()
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: config.Token},
 	)
 	tc := oauth2.NewClient(ctx, ts)
 
-	// REST API client
 	restClient := github.NewClient(tc)
-
-	// GraphQL API client
 	graphqlClient := githubv4.NewClient(tc)
 
-	// Create service with both clients
 	service := &DateManagerService{
 		ctx:           ctx,
 		config:        config,
@@ -142,25 +190,21 @@ func main() {
 		graphqlClient: graphqlClient,
 	}
 
-	// Run the date update process
 	if err := service.Run(); err != nil {
 		log.Fatalf("Error: %v", err)
 	}
-}
-
-// DateManagerService handles all GitHub API interactions
-type DateManagerService struct {
-	ctx           context.Context
-	config        *Config
-	restClient    *github.Client
-	graphqlClient *githubv4.Client
 }
 
 // Run executes the date update process
 func (s *DateManagerService) Run() error {
 	fmt.Printf("Starting date update process for %s/%s\n", s.config.Owner, s.config.Repo)
 
-	// Determine which features to update
+	// Initialize caches
+	s.issueCache = make(map[int]*github.Issue)
+	s.milestoneCache = make(map[int]*github.Milestone)
+	s.projectDataCache = make(map[int][]ProjectV2Item)
+	s.projectFieldCache = make(map[string]FieldIDs)
+
 	featureIssueNumbers := []int{}
 
 	// Case 1: Manual trigger with a specific feature
@@ -231,8 +275,28 @@ func (s *DateManagerService) Run() error {
 			}
 		}
 	} else {
-		fmt.Println("No issue context available")
-		fmt.Println("For manual runs, please provide a FEATURE_ISSUE_NUMBER environment variable")
+		fmt.Println("No issue context available, checking all features in the repository")
+
+		// Search for all open feature issues
+		query := fmt.Sprintf("repo:%s/%s is:issue state:open label:feature",
+			s.config.Owner, s.config.Repo)
+
+		searchOptions := &github.SearchOptions{
+			ListOptions: github.ListOptions{PerPage: 100},
+		}
+
+		searchResults, _, err := s.restClient.Search.Issues(s.ctx, query, searchOptions)
+		if err != nil {
+			log.Printf("Error searching for features: %v", err)
+		} else if searchResults.GetTotal() > 0 {
+			fmt.Printf("Found %d feature issues to process\n", searchResults.GetTotal())
+			for _, item := range searchResults.Issues {
+				featureIssueNumbers = append(featureIssueNumbers, item.GetNumber())
+			}
+		} else {
+			fmt.Println("No features found in repository")
+			fmt.Println("For manual runs, please provide a FEATURE_ISSUE_NUMBER environment variable")
+		}
 	}
 
 	// Update specified milestone if provided
@@ -264,12 +328,71 @@ func (s *DateManagerService) Run() error {
 	return nil
 }
 
+func (s *DateManagerService) getIssue(issueNumber int) (*github.Issue, error) {
+	if issue, ok := s.issueCache[issueNumber]; ok {
+		return issue, nil
+	}
+
+	issue, _, err := s.restClient.Issues.Get(s.ctx, s.config.Owner, s.config.Repo, issueNumber)
+	if err != nil {
+		return nil, err
+	}
+
+	s.issueCache[issueNumber] = issue
+	return issue, nil
+}
+
+// Cached milestone retrieval
+func (s *DateManagerService) getMilestone(milestoneNumber int) (*github.Milestone, error) {
+	if milestone, ok := s.milestoneCache[milestoneNumber]; ok {
+		return milestone, nil
+	}
+
+	milestone, _, err := s.restClient.Issues.GetMilestone(s.ctx, s.config.Owner, s.config.Repo, milestoneNumber)
+	if err != nil {
+		return nil, err
+	}
+
+	s.milestoneCache[milestoneNumber] = milestone
+	return milestone, nil
+}
+
+// Cached project data retrieval
+func (s *DateManagerService) getProjectDataCached(issueNumber int) ([]ProjectV2Item, error) {
+	if items, ok := s.projectDataCache[issueNumber]; ok {
+		return items, nil
+	}
+
+	items, err := s.getProjectData(issueNumber)
+	if err != nil {
+		return nil, err
+	}
+
+	s.projectDataCache[issueNumber] = items
+	return items, nil
+}
+
+// Cached project field IDs retrieval
+func (s *DateManagerService) getProjectFieldIdsCached(projectId string) (FieldIDs, error) {
+	if fieldIds, ok := s.projectFieldCache[projectId]; ok {
+		return fieldIds, nil
+	}
+
+	fieldIds, err := s.getProjectFieldIds(projectId)
+	if err != nil {
+		return FieldIDs{}, err
+	}
+
+	s.projectFieldCache[projectId] = fieldIds
+	return fieldIds, nil
+}
+
 // Find the parent feature for a task
 func (s *DateManagerService) findParentFeature(taskIssueNumber int) (int, error) {
 	fmt.Printf("Finding parent feature for task #%d...\n", taskIssueNumber)
 
 	// Get the task issue details
-	issue, _, err := s.restClient.Issues.Get(s.ctx, s.config.Owner, s.config.Repo, taskIssueNumber)
+	issue, err := s.getIssue(taskIssueNumber)
 	if err != nil {
 		return 0, err
 	}
@@ -283,7 +406,7 @@ func (s *DateManagerService) findParentFeature(taskIssueNumber int) (int, error)
 			featureNumber, _ := strconv.Atoi(matches[1])
 
 			// Verify this is actually a feature
-			feature, _, err := s.restClient.Issues.Get(s.ctx, s.config.Owner, s.config.Repo, featureNumber)
+			feature, err := s.getIssue(featureNumber)
 			if err != nil {
 				return 0, err
 			}
@@ -415,28 +538,58 @@ func (s *DateManagerService) findFeatureTasks(featureNumber int) ([]int, error) 
 
 // Get project field values for an issue
 func (s *DateManagerService) getProjectData(issueNumber int) ([]ProjectV2Item, error) {
-	var query struct {
-		Repository struct {
-			Issue struct {
-				ProjectItems struct {
-					Nodes []ProjectV2Item
-				} `graphql:"projectItems(first: 20)"`
-			} `graphql:"issue(number: $issueNumber)"`
-		} `graphql:"repository(owner: $owner, name: $repo)"`
-	}
-
+	// Define the variables
 	variables := map[string]interface{}{
 		"owner":       githubv4.String(s.config.Owner),
 		"repo":        githubv4.String(s.config.Repo),
 		"issueNumber": githubv4.Int(issueNumber),
 	}
 
+	// Define the query structure
+	var query struct {
+		Repository struct {
+			Issue struct {
+				ProjectItems struct {
+					Nodes []struct {
+						ID      string `graphql:"id"`
+						Project struct {
+							ID    string `graphql:"id"`
+							Title string `graphql:"title"`
+						} `graphql:"project"`
+						FieldValues struct {
+							Nodes []struct {
+								TypeName string `graphql:"__typename"`
+								// Use appropriate fragments for each possible type in the union
+								// For date values
+								DateValue struct {
+									Date  string `graphql:"date"`
+									Field struct {
+										// We need to use a fragment here too if Field is a union or interface
+										CommonField struct {
+											Name string `graphql:"name"`
+										} `graphql:"... on ProjectV2FieldCommon"`
+									} `graphql:"field"`
+								} `graphql:"... on ProjectV2ItemFieldDateValue"`
+								// Add other value types as needed
+							} `graphql:"nodes"`
+						} `graphql:"fieldValues(first: 20)"`
+					} `graphql:"nodes"`
+				} `graphql:"projectItems(first: 20)"`
+			} `graphql:"issue(number: $issueNumber)"`
+		} `graphql:"repository(owner: $owner, name: $repo)"`
+	}
+
+	// Execute the query
 	err := s.graphqlClient.Query(s.ctx, &query, variables)
 	if err != nil {
 		return nil, err
 	}
 
-	return query.Repository.Issue.ProjectItems.Nodes, nil
+	// Convert to your ProjectV2Item type
+	var result []ProjectV2Item
+	// Transform the data as needed
+
+	return result, nil
 }
 
 // Get next business day (skip weekends)
@@ -452,13 +605,18 @@ func getNextBusinessDay(date time.Time) time.Time {
 }
 
 // Format date as YYYY-MM-DD
-func formatDate(date time.Time) string {
-	return date.Format("2006-01-02")
+func formatDate(date time.Time) githubv4.Date {
+	return githubv4.Date{Time: date}
 }
 
 // Parse date from YYYY-MM-DD format
-func parseDate(dateStr string) (time.Time, error) {
-	return time.Parse("2006-01-02", dateStr)
+func parseDate(dateStr string) (githubv4.Date, error) {
+	date, err := time.Parse("2006-01-02", dateStr)
+	if err != nil {
+		return githubv4.Date{}, err
+	}
+
+	return githubv4.Date{Time: date}, nil
 }
 
 // Find project field IDs for a project
@@ -496,7 +654,7 @@ func (s *DateManagerService) getProjectFieldIds(projectId string) (FieldIDs, err
 }
 
 // Update a date field for an issue in a project
-func (s *DateManagerService) updateProjectDateField(projectId string, itemId string, fieldId string, date string) error {
+func (s *DateManagerService) updateProjectDateField(projectId string, itemId string, fieldId string, date githubv4.Date) error {
 	var mutation struct {
 		UpdateProjectV2ItemFieldValue struct {
 			ProjectV2Item struct {
@@ -505,15 +663,34 @@ func (s *DateManagerService) updateProjectDateField(projectId string, itemId str
 		} `graphql:"updateProjectV2ItemFieldValue(input: $input)"`
 	}
 
-	dateValue := map[string]interface{}{
-		"date": githubv4.String(date),
+	input := githubv4.UpdateProjectV2ItemFieldValueInput{
+		ProjectID: githubv4.ID(projectId),
+		ItemID:    githubv4.ID(itemId),
+		FieldID:   githubv4.ID(fieldId),
+		Value: githubv4.ProjectV2FieldValue{
+			Date: &date,
+		},
+	}
+
+	return s.graphqlClient.Mutate(s.ctx, &mutation, input, nil)
+}
+
+func (s *DateManagerService) updateProjectDurationField(projectId string, itemId string, fieldId string, duration githubv4.Float) error {
+	var mutation struct {
+		UpdateProjectV2ItemFieldValue struct {
+			ProjectV2Item struct {
+				ID string
+			}
+		} `graphql:"updateProjectV2ItemFieldValue(input: $input)"`
 	}
 
 	input := githubv4.UpdateProjectV2ItemFieldValueInput{
 		ProjectID: githubv4.ID(projectId),
 		ItemID:    githubv4.ID(itemId),
 		FieldID:   githubv4.ID(fieldId),
-		Value:     dateValue,
+		Value: githubv4.ProjectV2FieldValue{
+			Number: &duration,
+		},
 	}
 
 	return s.graphqlClient.Mutate(s.ctx, &mutation, input, nil)
@@ -524,7 +701,7 @@ func (s *DateManagerService) updateFeatureIssue(featureNumber int) (int, error) 
 	fmt.Printf("\n--- Updating feature #%d ---\n", featureNumber)
 
 	// Get the feature's milestone
-	feature, _, err := s.restClient.Issues.Get(s.ctx, s.config.Owner, s.config.Repo, featureNumber)
+	feature, err := s.getIssue(featureNumber)
 	if err != nil {
 		return 0, err
 	}
@@ -554,7 +731,7 @@ func (s *DateManagerService) updateFeatureIssue(featureNumber int) (int, error) 
 
 	// Get date information from each task
 	for _, taskNumber := range taskNumbers {
-		projectItems, err := s.getProjectData(taskNumber)
+		projectItems, err := s.getProjectDataCached(taskNumber)
 		if err != nil {
 			log.Printf("Error getting project data for task #%d: %v", taskNumber, err)
 			continue
@@ -572,21 +749,15 @@ func (s *DateManagerService) updateFeatureIssue(featureNumber int) (int, error) 
 		taskHasDates := false
 
 		for _, projectItem := range projectItems {
-			var startDate *time.Time
-			var targetDate *time.Time
+			var startDate *githubv4.Date
+			var targetDate *githubv4.Date
 			var duration *float64
 
 			for _, fieldValue := range projectItem.FieldValues.Nodes {
 				if fieldValue.Field.Name == "Start Date" && fieldValue.DateValue != nil {
-					parsedDate, err := parseDate(*fieldValue.DateValue)
-					if err == nil {
-						startDate = &parsedDate
-					}
+					startDate = fieldValue.DateValue
 				} else if fieldValue.Field.Name == "Target Date" && fieldValue.DateValue != nil {
-					parsedDate, err := parseDate(*fieldValue.DateValue)
-					if err == nil {
-						targetDate = &parsedDate
-					}
+					targetDate = fieldValue.DateValue
 				} else if fieldValue.Field.Name == "Duration (days)" && fieldValue.NumberValue != nil {
 					duration = fieldValue.NumberValue
 				}
@@ -594,17 +765,19 @@ func (s *DateManagerService) updateFeatureIssue(featureNumber int) (int, error) 
 
 			if startDate != nil {
 				if earliestStartDate.IsZero() || startDate.Before(earliestStartDate) {
-					earliestStartDate = *startDate
+					earliestStartDate = startDate.Time
 				}
 				taskHasDates = true
 			}
 
 			if targetDate != nil {
 				if latestTargetDate.IsZero() || targetDate.After(latestTargetDate) {
-					latestTargetDate = *targetDate
+					latestTargetDate = targetDate.Time
 				}
 				taskHasDates = true
 			}
+
+			fmt.Println(duration)
 		}
 
 		if !taskHasDates {
@@ -642,31 +815,48 @@ func (s *DateManagerService) updateFeatureIssue(featureNumber int) (int, error) 
 
 			fmt.Printf("Setting default dates for task #%d: Start=%s, Target=%s\n", task.TaskNumber, taskStartDate, taskTargetDate)
 
+			startDateParsed := taskStartDate.Time
+			targetDateParsed := taskTargetDate.Time
+
 			// Update the task's dates in all projects
 			for _, projectItem := range task.ProjectItems {
-				fieldIds, err := s.getProjectFieldIds(projectItem.Project.ID)
+				fieldIds, err := s.getProjectFieldIdsCached(projectItem.Project.ID)
 				if err != nil {
 					log.Printf("Error getting field IDs: %v", err)
 					continue
 				}
 
 				if fieldIds.StartDateFieldID != "" {
-					err := s.updateProjectDateField(projectItem.Project.ID, projectItem.ID, fieldIds.StartDateFieldID, taskStartDate)
+					err := s.updateProjectDateField(projectItem.Project.ID, projectItem.ID, fieldIds.StartDateFieldID, formatDate(startDateParsed))
 					if err != nil {
 						log.Printf("Error updating start date: %v", err)
 					}
 				}
 
 				if fieldIds.TargetDateFieldID != "" {
-					err := s.updateProjectDateField(projectItem.Project.ID, projectItem.ID, fieldIds.TargetDateFieldID, taskTargetDate)
+					err := s.updateProjectDateField(projectItem.Project.ID, projectItem.ID, fieldIds.TargetDateFieldID, formatDate(targetDateParsed))
 					if err != nil {
 						log.Printf("Error updating target date: %v", err)
+					}
+				}
+
+				// Add this new block for duration update
+				if fieldIds.DurationFieldID != "" {
+					// Calculate duration in days (including the target date)
+					duration := float64(targetDateParsed.Sub(startDateParsed).Hours()/24) + 1
+					if duration < 1 {
+						duration = 1 // Minimum duration of 1 day
+					}
+
+					fmt.Printf("Setting duration for task #%d to %.0f days\n", task.TaskNumber, duration)
+					err := s.updateProjectDurationField(projectItem.Project.ID, projectItem.ID, fieldIds.DurationFieldID, githubv4.Float(duration))
+					if err != nil {
+						log.Printf("Error updating duration: %v", err)
 					}
 				}
 			}
 
 			// Update our tracking of latest target date
-			targetDateParsed, _ := parseDate(taskTargetDate)
 			if latestTargetDate.IsZero() || targetDateParsed.After(latestTargetDate) {
 				latestTargetDate = targetDateParsed
 			}
@@ -701,6 +891,21 @@ func (s *DateManagerService) updateFeatureIssue(featureNumber int) (int, error) 
 				log.Printf("Error updating feature target date: %v", err)
 			}
 		}
+
+		// Add this new block for feature duration update
+		if fieldIds.DurationFieldID != "" && !earliestStartDate.IsZero() && !latestTargetDate.IsZero() {
+			// Calculate duration in days (including the target date)
+			duration := float64(latestTargetDate.Sub(earliestStartDate).Hours()/24) + 1
+			if duration < 1 {
+				duration = 1 // Minimum duration of 1 day
+			}
+
+			fmt.Printf("Updating feature #%d duration to %.0f days\n", featureNumber, duration)
+			err := s.updateProjectDurationField(projectItem.Project.ID, projectItem.ID, fieldIds.DurationFieldID, githubv4.Float(duration))
+			if err != nil {
+				log.Printf("Error updating feature duration: %v", err)
+			}
+		}
 	}
 
 	return milestoneNumber, nil
@@ -733,7 +938,7 @@ func (s *DateManagerService) updateMilestone(milestoneNumber int) error {
 	var latestTargetDate time.Time
 
 	for _, issue := range issues {
-		projectItems, err := s.getProjectData(issue.GetNumber())
+		projectItems, err := s.getProjectDataCached(issue.GetNumber())
 		if err != nil {
 			log.Printf("Error getting project data for issue #%d: %v", issue.GetNumber(), err)
 			continue
@@ -742,8 +947,8 @@ func (s *DateManagerService) updateMilestone(milestoneNumber int) error {
 		for _, projectItem := range projectItems {
 			for _, fieldValue := range projectItem.FieldValues.Nodes {
 				if fieldValue.Field.Name == "Target Date" && fieldValue.DateValue != nil {
-					parsedDate, err := parseDate(*fieldValue.DateValue)
-					if err == nil && (latestTargetDate.IsZero() || parsedDate.After(latestTargetDate)) {
+					parsedDate := fieldValue.DateValue.Time
+					if latestTargetDate.IsZero() || parsedDate.After(latestTargetDate) {
 						latestTargetDate = parsedDate
 					}
 				}
