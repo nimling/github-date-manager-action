@@ -94,5 +94,6 @@ jobs:
             date-manager
             README.md
             LICENSE
+            action.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
