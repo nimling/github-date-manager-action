@@ -1358,7 +1358,7 @@ func contains(slice []int, val int) bool {
 
 // loadConfig loads application configuration from environment variables
 func loadConfig() (*Config, error) {
-	err := godotenv.Load()
+	err := godotenv.Load(".env")
 	if err != nil {
 		log.Println("No .env file found, using environment variables")
 	}
@@ -1390,6 +1390,20 @@ func loadConfig() (*Config, error) {
 		for _, match := range matches {
 			if len(match) > 1 {
 				config.IssueLabels = append(config.IssueLabels, match[1])
+			}
+		}
+	}
+
+	if config.Owner == "" || config.Repo == "" {
+		if githubRepo := os.Getenv("GITHUB_REPOSITORY"); githubRepo != "" {
+			parts := strings.Split(githubRepo, "/")
+			if len(parts) == 2 {
+				if config.Owner == "" {
+					config.Owner = parts[0]
+				}
+				if config.Repo == "" {
+					config.Repo = parts[1]
+				}
 			}
 		}
 	}
