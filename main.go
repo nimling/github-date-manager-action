@@ -182,9 +182,7 @@ func (s *DateManagerService) loadAllFeatures() error {
 	searchOptions := &github.SearchOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
-
-	var allFeatures []*github.Issue
-
+	allFeatures := make([]*github.Issue, 0)
 	for {
 		results, resp, err := s.restClient.Search.Issues(s.ctx, query, searchOptions)
 		if err != nil {
@@ -787,6 +785,10 @@ func (s *DateManagerService) planFeatureUpdates(featureID int) error {
 	var earliestStartDate time.Time
 	var latestTargetDate time.Time
 
+	// Map to track issues with same start/target dates for duration calculation
+	dateRangeCount := make(map[string]int)
+	taskDateRanges := make(map[int]string) // Maps taskID to its date range key
+
 	// Process each task
 	for _, taskID := range feature.TaskIDs {
 		task, ok := s.taskCache[taskID]
@@ -809,6 +811,14 @@ func (s *DateManagerService) planFeatureUpdates(featureID int) error {
 				if latestTargetDate.IsZero() || task.TargetDate.After(latestTargetDate) {
 					latestTargetDate = *task.TargetDate
 				}
+			}
+
+			// Count tasks with identical date ranges for duration calculation
+			if task.StartDate != nil && task.TargetDate != nil {
+				dateKey := fmt.Sprintf("%s-%s", task.StartDate.Format("2006-01-02"),
+					task.TargetDate.Format("2006-01-02"))
+				dateRangeCount[dateKey]++
+				taskDateRanges[taskID] = dateKey
 			}
 		} else {
 			tasksWithMissingDates = append(tasksWithMissingDates, taskID)
@@ -845,6 +855,12 @@ func (s *DateManagerService) planFeatureUpdates(featureID int) error {
 
 			currentDate = currentDate.AddDate(0, 0, 1)
 			taskTargetDate := getNextBusinessDay(currentDate)
+
+			// Track this date range for duration calculations
+			dateKey := fmt.Sprintf("%s-%s", taskStartDate.Format("2006-01-02"),
+				taskTargetDate.Format("2006-01-02"))
+			dateRangeCount[dateKey]++
+			taskDateRanges[taskID] = dateKey
 
 			fmt.Printf("Planning default dates for task #%d: Start=%s, Target=%s\n",
 				taskID, taskStartDate.Format("2006-01-02"), taskTargetDate.Format("2006-01-02"))
@@ -886,25 +902,7 @@ func (s *DateManagerService) planFeatureUpdates(featureID int) error {
 					})
 				}
 
-				// Plan duration update
-				if fieldIDs.DurationFieldID != "" {
-					duration := float64(taskTargetDate.Sub(taskStartDate).Hours()/24) + 1
-					if duration < 1 {
-						duration = 1
-					}
-
-					s.plannedUpdates = append(s.plannedUpdates, PlannedUpdate{
-						Type:       "task",
-						ItemNumber: taskID,
-						ProjectID:  projectItem.Project.ID,
-						ItemID:     projectItem.ID,
-						FieldID:    fieldIDs.DurationFieldID,
-						FieldName:  "Duration (days)",
-						OldValue:   task.Duration,
-						NewValue:   duration,
-						HasChanged: true,
-					})
-				}
+				// Duration will be calculated in the final pass
 			}
 
 			// Update our tracking of latest date
@@ -917,6 +915,60 @@ func (s *DateManagerService) planFeatureUpdates(featureID int) error {
 			targetDateCopy := taskTargetDate
 			task.StartDate = &startDateCopy
 			task.TargetDate = &targetDateCopy
+		}
+	}
+
+	// Update durations for all tasks (including those with existing dates)
+	for _, taskID := range feature.TaskIDs {
+		task, ok := s.taskCache[taskID]
+		if !ok || task.StartDate == nil || task.TargetDate == nil {
+			continue
+		}
+
+		dateKey, ok := taskDateRanges[taskID]
+		if !ok {
+			// Generate date key if it doesn't exist
+			dateKey = fmt.Sprintf("%s-%s", task.StartDate.Format("2006-01-02"),
+				task.TargetDate.Format("2006-01-02"))
+		}
+
+		// Calculate duration for this task
+		rawDuration := float64(task.TargetDate.Sub(*task.StartDate).Hours()/24) + 1
+		if rawDuration < 1 {
+			rawDuration = 1
+		}
+
+		// If multiple issues have same date range, divide duration
+		var duration float64 = 1.0 // Minimum default
+		if count, ok := dateRangeCount[dateKey]; ok && count > 1 {
+			duration = rawDuration / float64(count)
+			if duration < 1 {
+				duration = 1 // Ensure minimum of 1 day
+			}
+		} else {
+			duration = rawDuration
+		}
+
+		// Plan duration update for all project items of this task
+		for _, projectItem := range task.ProjectData {
+			fieldIDs, ok := s.projectFieldCache[projectItem.Project.ID]
+			if !ok || fieldIDs.DurationFieldID == "" {
+				continue
+			}
+
+			shouldUpdate := task.Duration == nil || *task.Duration != duration
+
+			s.plannedUpdates = append(s.plannedUpdates, PlannedUpdate{
+				Type:       "task",
+				ItemNumber: taskID,
+				ProjectID:  projectItem.Project.ID,
+				ItemID:     projectItem.ID,
+				FieldID:    fieldIDs.DurationFieldID,
+				FieldName:  "Duration (days)",
+				OldValue:   task.Duration,
+				NewValue:   duration,
+				HasChanged: shouldUpdate,
+			})
 		}
 	}
 
@@ -967,9 +1019,16 @@ func (s *DateManagerService) planFeatureUpdates(featureID int) error {
 			// Plan duration update
 			if fieldIDs.DurationFieldID != "" {
 				// Calculate duration in days (including the target date)
-				duration := float64(latestTargetDate.Sub(earliestStartDate).Hours()/24) + 1
-				if duration < 1 {
-					duration = 1 // Minimum duration of 1 day
+				duration := 1.0 // Default minimum
+
+				if !earliestStartDate.IsZero() && !latestTargetDate.IsZero() {
+					rawDuration := float64(latestTargetDate.Sub(earliestStartDate).Hours()/24) + 1
+					if rawDuration < 1 {
+						rawDuration = 1 // Minimum duration of 1 day
+					}
+
+					// For features, we use the total duration rather than dividing
+					duration = rawDuration
 				}
 
 				shouldUpdate := feature.Duration == nil || *feature.Duration != duration
